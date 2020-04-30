@@ -1,0 +1,169 @@
+# importando os pacotes necessários
+import cv2
+import imutils
+import numpy as np
+from imutils import contours
+from imutils import perspective
+from scipy.spatial import distance as dist
+
+# carregar a imagem na variavel original
+original = cv2.imread('S3.jpg')
+
+# convertendo a imagem para escala de cinza
+cinza = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+# cinza_mostrar = cv2.cvtColor(redimen, cv2.COLOR_BGR2GRAY)
+#cv2.imwrite('1_escala_de_cinza.png', cinza)
+
+# aplicaçao do filtro gaussiano(passa baixa, média simples)
+# para borrar/desfocar a imagem e reduzir os ruídos
+gauss = cv2.GaussianBlur(cinza, (7, 7), 0)
+
+# detectando as bordas dos pontos de interesse(POI) com CANNY
+# devemos definir os limiares das bordas(maior e menor gradiente de intensidade)
+bordas = cv2.Canny(gauss, 50, 100)
+
+# aplicar a dilatação + erosão para fechar as lacunas nas bordas dos POI
+# e eliminar possíveis ruídos
+# dilatacao
+dilatada = cv2.dilate(bordas, None, iterations=1)
+
+# erosao
+erodida = cv2.erode(dilatada, None, iterations=1)
+
+# localizando os contornos e salvando em uma matriz
+contornos = cv2.findContours(erodida, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+# a linha abaixo usa o imutils para saber a versão do Python (tambem matriz)
+# e garantir que a linha acima funcione em qualquer versão.
+contornos = imutils.grab_contours(contornos)
+
+# o cv2 é eficiente em encontrar mas não organiza os contornos
+# usar o imutils para organizá-los da esquerda para a direita (matriz)
+(contornos_organizados, _) = contours.sort_contours(contornos, method='left-to-right')
+
+# iniciando uma lista de cores para os contornos usada dentro do loop a seguir
+# 1azul, 2roxo, 3laranja, 4azul claro, 5rosa
+cores_contornos = ((0, 0, 255), (240, 0, 159), (0, 165, 255), (255, 255, 0), (255, 0, 255))
+
+# iniciando a variável do objeto de referência, usada no loop a seguir
+objeto_ref = None
+
+# criando um método auxiliar para calcular o ponto médio de dois conjuntos
+# de coordenadas(x, y) usado no loop
+def ponto_medio(ptA, ptB):
+    return ((ptA[0] + ptB[0]) * 0.5, (ptA[1] + ptB[1]) * 0.5)
+
+# cria a variável para receber o valor em milimetros da largura do objeto referencia (ROI)
+LARGURA_REFERENCIA = 10
+
+# cria variavel para posição do texto
+nY = 10
+# cria variavel contador objeto
+conta_obj = 0
+z = 0
+# criando um loop por todos os contornos encontrados
+for c in contornos_organizados:
+    # passando direto pelo contorno pequeno demais(ruido/valor arbitrario)
+    if cv2.contourArea(c) < 100:
+        continue
+
+    # calculando o retangulo rotacionado para cada contorno
+    retangulo = cv2.minAreaRect(c)
+
+    # encontrando os vertices deste retangulo
+    vertices = cv2.boxPoints(retangulo)
+
+    # criar uma matriz com estes vertices
+    matriz_vertices = np.array(vertices, dtype='int')
+
+    # ordenando os vertices em sentido horario, esquerda-cima, direita-cima,
+    # direita-baixo, esquerda-baixo.
+    ordena_vertices = perspective.order_points(matriz_vertices)
+
+    # calcula o centro do retangulo
+    centroX = np.average(ordena_vertices[:, 0])
+    centroY = np.average(ordena_vertices[:, 1])
+
+    conta_obj = conta_obj + 1
+
+    # definindo o objeto referencia, por ser o primeiro(mais a esquerda) a ser analisado
+    if objeto_ref is None:
+        # desempacotando os vertices ordenados
+        (esqC, dirC, dirB, esqB) = ordena_vertices
+
+        # calculando os pontos medios nas "linhas verticais"
+
+        # calcula o ponto medio entre ESQUERDA-CIMA e ESQUERDA-BAIXO
+        (esqCesqBX, esqCesqBY) = ponto_medio(esqC, esqB)
+
+        # calcula o ponto medio entre DIREITA-CIMA e DIREITA-BAIXO
+        (dirCdirBX, dirCdirBY) = ponto_medio(dirC, dirB)
+
+        # calculando a distancia Euclidiana entre os pontos medios
+        # para definir a largura da ROI
+        dist_EUCLI = dist.euclidean((esqCesqBX, esqCesqBY), (dirCdirBX, dirCdirBY))
+
+        # construindo o objeto referencial como uma tupla com:
+        # as coordenadas dos vertices em sentido horário
+        # sua centroide
+        # a taxa de 'pixels por milimetro'
+        objeto_ref = (ordena_vertices, (centroX, centroY), dist_EUCLI/LARGURA_REFERENCIA)
+
+        continue
+
+    # desenhar os contornos no objeto referencial
+    cv2.drawContours(original, [objeto_ref[0].astype('int')], -1, (0, 255, 0), 2)
+
+    # desenhar os contorns em cada objeto analisado
+    cv2.drawContours(original, [ordena_vertices.astype('int')], -1, (0, 255, 0), 2)
+
+    # empilhar as coordenadas numa matriz de matrizes
+    # para fazer o loop de medição dos vértices e centros
+    # e adicionar os centros no valor de cada objeto
+
+    # coordenadas do objeto de referencia
+    coord_obj_referencia = np.vstack([objeto_ref[0], objeto_ref[1]])
+    centro_ref = np.vstack([objeto_ref[1]])
+
+    # coordenadas do objeto analisado
+    coord_obj_analisado = np.vstack([ordena_vertices, (centroX, centroY)])
+    centro_analisa = np.vstack([centroX, centroY])
+
+    # fazendo o loop de medição entre vertices e centros correspondendo
+    # objeto de referencia e analisado
+    for ((xA, yA), (xB, yB), cores) in zip(coord_obj_referencia,
+                                  coord_obj_analisado, cores_contornos):
+
+        z = z + 1
+        # utilizar só o ponto central ( resto da divisão de Z por 5 = zero)
+        if (z % 5 == 0):
+            # desenhar um pequeno circulo em cada ponto comparado
+            cv2.circle(original, (int(xA),int(yA)), 5, cores, -1)
+            cv2.circle(original, (int(xB), int(yB)), 5, cores, -1)
+
+            #desenha uma linha ligando os dois pontos
+            cv2.line(original, (int(xA), int(yA)), (int(xB), int(yB)), cores, 2)
+
+            # calcular a distancia euclidiana entre o ponto de referencia e o analisado
+            DE = dist.euclidean((xA, yA), (xB, yB)) / objeto_ref[2]
+            # calcula a distancia euclidiana entre o centro do objeto e o ponto 0,0
+            DC = dist.euclidean((0,0), (centroX, centroY)) / objeto_ref[2]
+
+            #ponto medio da linha entre os pontos
+            (pmX, pmY) = ponto_medio((xA, yA), (xB, yB))
+
+            # escreve a distancia
+            nY = nY + 15
+            cv2.putText(original, "{:.1f}mm".format(DE), (int(pmX), int(pmY) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, cores, 2)
+            cv2.putText(original, ("obj(1-{}): {:.1f}mm, {}X, {} Y".format(conta_obj, DE,  centroX, (original.shape[0]-centroY))), (int(15), int(nY)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores, 1)
+            cv2.putText(original, ("{}".format(conta_obj)), (int(xB), int(yB)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cores, 1)
+
+
+            cv2.imshow("Original", original)
+
+            print (DC)
+            cv2.waitKey(0)
+
+#cv2.imwrite("f22_result.jpg", original)
+print ("{} pixels em Y".format(original.shape[0]))
